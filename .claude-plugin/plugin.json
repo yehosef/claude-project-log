@@ -1,0 +1,9 @@
+{
+  "name": "claude-project-log",
+  "version": "0.1.0",
+  "description": "Background job that reads Claude Code transcripts, synthesizes per-project progress with claude-haiku, logs to a Notion Projects board, and injects resume state at session start",
+  "repository": "https://github.com/yehosef/claude-project-log",
+  "author": "yehosef",
+  "license": "BSD",
+  "keywords": ["notion", "claude-code", "logging", "automation", "hooks", "productivity", "project-tracking"]
+}

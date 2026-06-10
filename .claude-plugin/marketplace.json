@@ -1,0 +1,18 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "claude-project-log",
+  "version": "0.1.0",
+  "description": "Background job that reads Claude Code transcripts, synthesizes per-project progress with claude-haiku, logs to a Notion Projects board, and injects resume state at session start",
+  "owner": {
+    "name": "yehosef",
+    "email": "yehosef@gmail.com"
+  },
+  "plugins": [
+    {
+      "name": "claude-project-log",
+      "description": "Background job that reads Claude Code transcripts, synthesizes per-project progress with claude-haiku, logs to a Notion Projects board, and injects resume state at session start",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
