@@ -4,6 +4,16 @@ A Claude Code plugin that automatically tracks your project activity. A backgrou
 
 Works on macOS and Linux — no background daemon, no launchd, no cron. Scheduling is handled entirely by Claude Code hooks (`Stop` + `PostToolUse`) that fire as you work.
 
+## Screenshots
+
+The Notion Projects board, sorted by **Last Worked** with a glanceable **Last Active** ("time ago") column:
+
+![Projects board](assets/notion-board.png)
+
+A project's detail page — auto-maintained **Progress**, **Open Questions**, **Suggested Next** (Resume Here), **Status**, and **Last Worked**:
+
+![Project detail](assets/notion-detail.png)
+
 ## Prerequisites
 
 Before running setup, you need:
