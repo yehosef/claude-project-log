@@ -7,8 +7,9 @@
  * notion.json, ignore.json, or state/ without explicit confirmation.
  *
  * Works on macOS and Linux — no launchd or cron needed. Scheduling is
- * handled by a Stop hook (tick.sh) that fires on every Claude Code turn and
- * cheaply checks whether 20 minutes have elapsed before spawning a sweep.
+ * handled by Stop + PostToolUse hooks (both run tick.sh) that fire as you
+ * work and cheaply check whether 20 minutes have elapsed before spawning a
+ * sweep. A shared global gate ensures at most one sweep per interval.
  */
 
 import {
@@ -333,7 +334,7 @@ async function ensureNotionDatabase(
 }
 
 // ---------------------------------------------------------------------------
-// Step 6: Merge SessionStart + Stop hooks into ~/.claude/settings.json
+// Step 6: Merge SessionStart + Stop + PostToolUse hooks into settings.json
 // ---------------------------------------------------------------------------
 
 /**
@@ -370,6 +371,7 @@ function mergeHooks(installDir: string, bunBin: string): void {
   if (!settings.hooks) settings.hooks = {};
   if (!settings.hooks.SessionStart) settings.hooks.SessionStart = [];
   if (!settings.hooks.Stop) settings.hooks.Stop = [];
+  if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
 
   let changed = false;
 
@@ -384,7 +386,8 @@ function mergeHooks(installDir: string, bunBin: string): void {
     console.log(`SessionStart hook already present in ${settingsPath}`);
   }
 
-  // Stop hook — idempotency: match on "tick.sh"
+  // Stop hook — idempotency: match on "tick.sh". Fires at the end of every
+  // turn: the workhorse tick (the just-completed work is already on disk).
   if (!hookPresent(settings.hooks.Stop, "tick.sh")) {
     settings.hooks.Stop.push({
       hooks: [{ type: "command", command: stopCmd }],
@@ -393,6 +396,21 @@ function mergeHooks(installDir: string, bunBin: string): void {
     console.log(`Stop hook (heartbeat) added to ${settingsPath}`);
   } else {
     console.log(`Stop hook already present in ${settingsPath}`);
+  }
+
+  // PostToolUse hook — same tick.sh, gives coverage *during* long single-turn
+  // autonomous runs (Stop only fires when a turn ends). Safe to add alongside
+  // Stop: the gate is global + idempotent, so it still sweeps at most once per
+  // interval no matter how many hooks call it.
+  if (!hookPresent(settings.hooks.PostToolUse, "tick.sh")) {
+    settings.hooks.PostToolUse.push({
+      matcher: "*",
+      hooks: [{ type: "command", command: stopCmd }],
+    });
+    changed = true;
+    console.log(`PostToolUse hook (heartbeat) added to ${settingsPath}`);
+  } else {
+    console.log(`PostToolUse hook already present in ${settingsPath}`);
   }
 
   if (changed) {
@@ -423,7 +441,7 @@ if (import.meta.main) {
   // Step 5: create Notion database
   await ensureNotionDatabase(notionToken, notionParentPageId);
 
-  // Step 6: wire hooks (SessionStart + Stop)
+  // Step 6: wire hooks (SessionStart + Stop + PostToolUse)
   const bunBin = process.execPath;
   mergeHooks(INSTALL_DIR, bunBin);
 
@@ -431,9 +449,11 @@ if (import.meta.main) {
   console.log(`
 === Setup complete ===
 
-Sweeps run automatically via the Stop hook (every ~20 min by default).
-Each Claude Code turn fires tick.sh, which checks elapsed time and spawns
-the sweep detached — your session is never blocked.
+Sweeps run automatically via the Stop hook (end of every turn) plus a
+PostToolUse hook (covers long single-turn runs) — every ~20 min by default.
+Each fires tick.sh, which checks elapsed time and spawns the sweep detached,
+so your session is never blocked. The shared gate means it still sweeps at
+most once per interval no matter how many hooks fire.
 Override the interval: PROJECTLOG_INTERVAL=600 (seconds) in your shell env.
 
 In Notion, open the Projects database → Sort → Last Worked → Descending
@@ -457,7 +477,7 @@ Opt out a directory from tracking:
   bun ${INSTALL_DIR}/cli.ts ignore /path/to/dir
 
 Uninstall:
-  # Remove SessionStart and Stop hooks from ~/.claude/settings.json
+  # Remove the SessionStart, Stop, and PostToolUse hooks from ~/.claude/settings.json
   rm -rf ~/.claude/projects-log
 `);
 }

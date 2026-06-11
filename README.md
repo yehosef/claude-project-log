@@ -2,7 +2,7 @@
 
 A Claude Code plugin that automatically tracks your project activity. A background job reads Claude Code transcripts every 20 minutes, synthesizes a per-project progress delta using claude-haiku, appends timestamped entries to a Notion Projects board, and injects a `STATE.md` resume card at the start of every new session — so you never lose context when switching between projects.
 
-Works on macOS and Linux — no background daemon, no launchd, no cron. Scheduling is handled entirely by a Stop hook that fires on every Claude Code turn.
+Works on macOS and Linux — no background daemon, no launchd, no cron. Scheduling is handled entirely by Claude Code hooks (`Stop` + `PostToolUse`) that fire as you work.
 
 ## Prerequisites
 
@@ -66,11 +66,18 @@ Setup will:
 3. Prompt for your Notion token, parent page ID, and optional API key
 4. Write `~/.claude/projects-log/.env` (mode 0600)
 5. Create a "Projects" Notion database under your parent page
-6. Add `SessionStart` and `Stop` hooks to `~/.claude/settings.json`
+6. Add `SessionStart`, `Stop`, and `PostToolUse` hooks to `~/.claude/settings.json`
 
 ## How scheduling works
 
-Setup installs a `Stop` hook in `~/.claude/settings.json`. This hook runs `tick.sh` after every Claude Code turn — a fast bash script that checks whether at least 20 minutes have elapsed since the last sweep. If so, it writes an atomic timestamp and spawns `synth.ts --sweep` detached in the background (`nohup ... &`), then returns immediately. Your session is never blocked.
+Setup installs two heartbeat hooks in `~/.claude/settings.json`, both running the same `tick.sh`:
+
+- **`Stop`** — fires at the end of every turn (the workhorse: the work you just did is already on disk).
+- **`PostToolUse`** — fires after each tool call, which gives coverage *during* long single-turn autonomous runs (where `Stop` wouldn't fire until the run ends).
+
+`tick.sh` is a fast bash script that checks whether at least 20 minutes have elapsed since the last sweep. If so, it writes an atomic timestamp and spawns `synth.ts --sweep` detached in the background (`nohup ... &`), then returns immediately. Your session is never blocked.
+
+Both hooks share **one global, idempotent gate** (a single timestamp file + the lock below), so it still sweeps at most once per interval no matter how many hooks fire — that's why it's safe to attach `tick.sh` to multiple hook types.
 
 The authoritative concurrency guard is `synth.ts`'s existing O_EXCL file lock with pid liveness and 10-minute stale reclaim — `tick.sh` is only a cheap pre-filter that avoids spawning on every turn.
 
@@ -110,7 +117,7 @@ bun ~/.claude/projects-log/cli.ts pull .           # refresh Next Steps + STATE.
 
 ## How it works
 
-1. **Stop hook** fires `tick.sh` after every Claude Code turn — cheaply checks elapsed time, spawns sweep detached if due
+1. **Heartbeat hooks** (`Stop` after every turn + `PostToolUse` after each tool call) fire `tick.sh` — it cheaply checks elapsed time and spawns the sweep detached if due. A shared, idempotent gate means at most one sweep per interval.
 2. **Discovery**: reads recent `.jsonl` transcript files from `~/.claude/projects/`, counts assistant turns per unique `cwd`, deduplicates by git root
 3. **Auto-register**: directories with ≥3 turns get a Notion page created and enter the registry
 4. **Synthesis**: for each registered project, collects new transcript lines since the last sweep, redacts secrets, prepends git context, and calls `claude -p --model claude-haiku-4-5` to produce a JSON summary
@@ -196,7 +203,7 @@ The `NOTION_TOKEN` must always be present in `.env` (mode 0600).
 ```bash
 # Remove the hooks from ~/.claude/settings.json:
 # Delete the SessionStart entry containing "hook.ts session-start"
-# Delete the Stop entry containing "tick.sh"
+# Delete the Stop and PostToolUse entries containing "tick.sh"
 
 # Remove all data:
 rm -rf ~/.claude/projects-log
