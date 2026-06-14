@@ -7,8 +7,8 @@
  * notion.json, ignore.json, or state/ without explicit confirmation.
  *
  * Works on macOS and Linux — no launchd or cron needed. Scheduling is
- * handled by Stop + PostToolUse hooks (both run tick.sh) that fire as you
- * work and cheaply check whether 20 minutes have elapsed before spawning a
+ * handled by Stop + PostToolUse + SessionEnd hooks (all run tick.sh) that fire
+ * as you work and cheaply check whether 20 minutes have elapsed before spawning a
  * sweep. A shared global gate ensures at most one sweep per interval.
  */
 
@@ -357,6 +357,7 @@ function mergeHooks(installDir: string, bunBin: string): void {
   const settingsPath = join(homedir(), ".claude", "settings.json");
   const sessionStartCmd = `${bunBin} ${installDir}/hook.ts session-start`;
   const stopCmd = `bash ${installDir}/tick.sh`;
+  const sessionEndCmd = `bash ${installDir}/tick.sh force`;
 
   let settings: any = {};
   if (existsSync(settingsPath)) {
@@ -372,6 +373,7 @@ function mergeHooks(installDir: string, bunBin: string): void {
   if (!settings.hooks.SessionStart) settings.hooks.SessionStart = [];
   if (!settings.hooks.Stop) settings.hooks.Stop = [];
   if (!settings.hooks.PostToolUse) settings.hooks.PostToolUse = [];
+  if (!settings.hooks.SessionEnd) settings.hooks.SessionEnd = [];
 
   let changed = false;
 
@@ -411,6 +413,20 @@ function mergeHooks(installDir: string, bunBin: string): void {
     console.log(`PostToolUse hook (heartbeat) added to ${settingsPath}`);
   } else {
     console.log(`PostToolUse hook already present in ${settingsPath}`);
+  }
+
+  // SessionEnd hook — forced sweep (bypasses the 20-min gate) so the LAST work
+  // of a session is captured. After a session ends there are no more ticks, so
+  // without this the final edits wait until the next session's first tick.
+  // Idempotency: match on "tick.sh force".
+  if (!hookPresent(settings.hooks.SessionEnd, "tick.sh force")) {
+    settings.hooks.SessionEnd.push({
+      hooks: [{ type: "command", command: sessionEndCmd }],
+    });
+    changed = true;
+    console.log(`SessionEnd hook (final sweep) added to ${settingsPath}`);
+  } else {
+    console.log(`SessionEnd hook already present in ${settingsPath}`);
   }
 
   if (changed) {

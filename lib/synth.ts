@@ -1062,6 +1062,17 @@ if (import.meta.main) {
       process.exit(0);
     }
 
+    // Reliability: release the lock even on a hard crash (uncaught error /
+    // unhandled rejection) so a leaked lock can't freeze future sweeps.
+    // Installed only AFTER we own the lock so we never delete another's lock.
+    const onFatal = (label: string) => (e: unknown) => {
+      console.error(`[synth] ${label}:`, e);
+      try { releaseLock(); } catch {}
+      process.exit(1);
+    };
+    process.on("uncaughtException", onFatal("uncaughtException"));
+    process.on("unhandledRejection", onFatal("unhandledRejection"));
+
     try {
       await runSweep(dryRun);
     } finally {

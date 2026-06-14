@@ -14,6 +14,12 @@ TICKLOCK="$DIR/.tick.lock"
 LOG="$HOME/.claude/logs/projectlog.out.log"
 INTERVAL="${PROJECTLOG_INTERVAL:-1200}"   # seconds between sweeps (default 20 min)
 
+# "force" (passed by the SessionEnd hook) bypasses the time gate so the LAST
+# work of a session is always captured — there are no more ticks after the
+# session ends, so without this the final edits wait until the next session.
+FORCE=0
+[ "$1" = "force" ] && FORCE=1
+
 # Not installed → do nothing.
 [ -f "$DIR/synth.ts" ] || exit 0
 
@@ -22,7 +28,7 @@ last=0
 [ -f "$STAMP" ] && last=$(cat "$STAMP" 2>/dev/null)
 case "$last" in ''|*[!0-9]*) last=0 ;; esac   # guard against corrupt/empty stamp
 
-if [ $(( now - last )) -ge "$INTERVAL" ]; then
+if [ "$FORCE" = "1" ] || [ $(( now - last )) -ge "$INTERVAL" ]; then
   # Atomically claim the slot so parallel sessions' ticks don't all spawn.
   # mkdir is atomic across processes; only one tick wins the race.
   if mkdir "$TICKLOCK" 2>/dev/null; then

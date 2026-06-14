@@ -49,7 +49,20 @@ async function notionFetch(
       await new Promise((r) => setTimeout(r, 1000 * Math.pow(2, attempt - 1)));
     }
 
-    const res = await fetch(url, { ...options, headers });
+    let res: Response;
+    try {
+      res = await fetch(url, { ...options, headers });
+    } catch (e) {
+      // Network-level failure (ECONNRESET, socket closed, DNS, timeout).
+      // Treat as retryable instead of letting it throw out of the loop and
+      // crash the whole sweep.
+      lastError = new NotionError(
+        0,
+        String(e),
+        `Notion network error on ${options.method ?? "GET"} ${path} (attempt ${attempt + 1})`
+      );
+      continue; // retry
+    }
 
     if (res.ok) {
       return res.json();
