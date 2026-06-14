@@ -41,6 +41,7 @@ import {
 import {
   slugDirs,
   collectDelta,
+  resetFileCache,
   seedOffsetsToNow,
   redact,
   type ProjectState,
@@ -620,10 +621,6 @@ async function processProject(
 
   const now = new Date();
 
-  // Gather git context (skip gracefully if not a repo)
-  const gitCtx = gatherGitContext(entry.cwd);
-  log(`Git context: isRepo=${gitCtx.isRepo}, branch=${gitCtx.branch}, commits=${gitCtx.recentCommits.length}`);
-
   // --- Staleness → Paused pass (sweep-only) ---
   // Run BEFORE delta check so it happens even if no new activity.
   if (isSweep && !dryRun) {
@@ -671,6 +668,12 @@ async function processProject(
     console.log(`  ${delta.count} new lines, digest ${digest.length} chars`);
     return;
   }
+
+  // Gather git context only now that we know we'll synthesize. Each call spawns
+  // ~4 git subprocesses; doing it for every debounced project was a large part
+  // of sweep wall-time. Now it runs only for projects with real new activity.
+  const gitCtx = gatherGitContext(entry.cwd);
+  log(`Git context: isRepo=${gitCtx.isRepo}, branch=${gitCtx.branch}, commits=${gitCtx.recentCommits.length}`);
 
   // Build git context block and prepend to digest
   const gitBlock = buildGitBlock(gitCtx);
@@ -882,6 +885,8 @@ function guessArea(cwd: string): string {
 }
 
 async function runSweep(dryRun: boolean): Promise<void> {
+  resetFileCache(); // read/stat/realpath each path at most once per sweep
+
   const gs = loadGlobalState();
   const lastSweepAt = gs.lastSweepAt
     ? new Date(gs.lastSweepAt).getTime()

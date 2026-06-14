@@ -3,10 +3,67 @@
  * with per-file byte-offset watermarks. Returns a redacted digest of new lines.
  */
 
-import { readdirSync, statSync, openSync, readSync, closeSync, realpathSync } from "node:fs";
+import { readdirSync, statSync, readFileSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { isIgnored, findProjectForCwd } from "./registry.ts";
+
+// Per-sweep caches. A sweep processes every project, and each project's
+// collectDelta would otherwise (a) re-walk the whole ~/.claude/projects tree,
+// (b) re-stat every file, and (c) re-read the same (often large) transcripts —
+// all O(projects × files). Caching the file list, stats, and contents for the
+// duration of one sweep makes each of those O(files) instead. The difference is
+// a multi-minute sweep vs a sub-second one. Cleared at the start of each sweep.
+let fileCache = new Map<string, Buffer>();
+let fileListCache: string[] | null = null;
+let statCache = new Map<string, { mtimeMs: number; size: number } | null>();
+let realpathCache = new Map<string, string>();
+
+export function resetFileCache(): void {
+  fileCache = new Map();
+  fileListCache = null;
+  statCache = new Map();
+  realpathCache = new Map();
+}
+
+/** realpathSync, cached per sweep. There are only ~100 distinct cwds across the
+ *  whole tree, but routing previously called realpathSync per line × per other
+ *  project — millions of syscalls. Caching collapses that to one per path. */
+function cachedRealpath(p: string): string {
+  const hit = realpathCache.get(p);
+  if (hit !== undefined) return hit;
+  let r: string;
+  try {
+    r = realpathSync(p);
+  } catch {
+    r = p;
+  }
+  realpathCache.set(p, r);
+  return r;
+}
+
+/** All transcript .jsonl files, enumerated once per sweep. */
+function getAllJsonl(): string[] {
+  if (fileListCache) return fileListCache;
+  const out: string[] = [];
+  for (const slugDir of slugDirs()) out.push(...findJsonlFiles(slugDir));
+  fileListCache = out;
+  return out;
+}
+
+/** statSync result, cached once per sweep (null if the file is gone). */
+function getStat(filePath: string): { mtimeMs: number; size: number } | null {
+  if (statCache.has(filePath)) return statCache.get(filePath)!;
+  let s: { mtimeMs: number; size: number } | null = null;
+  try {
+    const st = statSync(filePath);
+    s = { mtimeMs: st.mtimeMs, size: st.size };
+  } catch {
+    s = null;
+  }
+  statCache.set(filePath, s);
+  return s;
+}
 
 const PROJECTS_DIR = join(
   process.env.HOME ?? homedir(),
@@ -177,13 +234,10 @@ export interface CollectOptions {
 export async function collectDelta(opts: CollectOptions): Promise<DeltaResult> {
   const { projectPath, state, ignoreList, otherProjectCwds } = opts;
 
-  // Resolve the project path to handle symlinks
-  let resolvedProjectPath: string;
-  try {
-    resolvedProjectPath = realpathSync(projectPath);
-  } catch {
-    resolvedProjectPath = projectPath;
-  }
+  // Resolve paths once (cached), not per line. otherProjectCwds is the same for
+  // every line, so resolve the whole set up front.
+  const resolvedProjectPath = cachedRealpath(projectPath);
+  const resolvedOthers = otherProjectCwds.map(cachedRealpath);
 
   const lastSynthAt = state.lastSynthAt
     ? new Date(state.lastSynthAt).getTime()
@@ -191,62 +245,57 @@ export async function collectDelta(opts: CollectOptions): Promise<DeltaResult> {
   // 1h slack: re-read files modified slightly before lastSynthAt
   const mtimeThreshold = lastSynthAt - 3_600_000;
 
-  const allJsonl: string[] = [];
-  for (const slugDir of slugDirs()) {
-    allJsonl.push(...findJsonlFiles(slugDir));
-  }
+  const allJsonl = getAllJsonl();
 
   const digestLines: string[] = [];
   const newOffsets: Record<string, number> = {};
 
   for (const filePath of allJsonl) {
+    const st = getStat(filePath);
+    if (!st) continue; // file gone
     // mtime optimization: skip files not touched since threshold
-    if (mtimeThreshold > 0) {
-      try {
-        const mtime = statSync(filePath).mtimeMs;
-        if (mtime < mtimeThreshold) continue;
-      } catch {
-        continue;
-      }
-    }
+    if (mtimeThreshold > 0 && st.mtimeMs < mtimeThreshold) continue;
 
     const fileState = state.files[filePath] ?? { offset: 0 };
     let offset = fileState.offset;
 
-    // Read from offset
-    let fileSize = 0;
-    try {
-      fileSize = statSync(filePath).size;
-    } catch {
+    // Cheap pre-check using the cached size: if this project's offset is already
+    // at/after EOF, there is nothing new — skip without reading the file at all.
+    // This is what makes dormant projects nearly free.
+    if (st.size <= offset) {
+      newOffsets[filePath] = offset;
       continue;
     }
 
+    // Read the full file ONCE per sweep (shared cache), then slice from offset.
+    // Avoids re-reading the same (often large) transcript for every project.
+    let full: Buffer;
+    const cached = fileCache.get(filePath);
+    if (cached) {
+      full = cached;
+    } else {
+      try {
+        full = readFileSync(filePath);
+      } catch {
+        continue;
+      }
+      fileCache.set(filePath, full);
+    }
+
+    const fileSize = full.length;
     if (fileSize <= offset) {
       newOffsets[filePath] = offset;
       continue;
     }
 
-    const toRead = fileSize - offset;
-    const buf = Buffer.allocUnsafe(toRead);
-    let bytesRead = 0;
-    let fd: number;
-    try {
-      fd = openSync(filePath, "r");
-    } catch {
-      continue;
-    }
-    try {
-      bytesRead = readSync(fd, buf, 0, toRead, offset);
-    } finally {
-      closeSync(fd);
-    }
-
+    const buf = full.subarray(offset);
+    const bytesRead = buf.length;
     if (bytesRead === 0) {
       newOffsets[filePath] = offset;
       continue;
     }
 
-    const raw = buf.subarray(0, bytesRead).toString("utf8");
+    const raw = buf.toString("utf8");
     const lines = raw.split("\n");
 
     // The last element may be a partial line — don't advance offset past it
@@ -283,26 +332,15 @@ export async function collectDelta(opts: CollectOptions): Promise<DeltaResult> {
       const lineCwd: string = obj.cwd ?? "";
       if (!lineCwd) continue;
 
-      // Resolve the cwd for accurate matching
-      let resolvedLineCwd: string;
-      try {
-        resolvedLineCwd = realpathSync(lineCwd);
-      } catch {
-        resolvedLineCwd = lineCwd;
-      }
+      // Resolve the cwd for accurate matching (cached — many lines share a cwd)
+      const resolvedLineCwd = cachedRealpath(lineCwd);
 
       // Check ignore list against this line's cwd
       if (isIgnored(resolvedLineCwd, ignoreList)) continue;
 
       // Check if this cwd belongs to a different registered project
       let belongsToOther = false;
-      for (const otherCwd of otherProjectCwds) {
-        let resolvedOther: string;
-        try {
-          resolvedOther = realpathSync(otherCwd);
-        } catch {
-          resolvedOther = otherCwd;
-        }
+      for (const resolvedOther of resolvedOthers) {
         if (
           resolvedLineCwd === resolvedOther ||
           resolvedLineCwd.startsWith(resolvedOther + "/")
