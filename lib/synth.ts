@@ -255,7 +255,27 @@ function runClaudeSynth(digest: string): SynthResult | null {
   mkdirSync(SCRATCH_DIR, { recursive: true });
 
   const apiKey = getAnthropicKey();
-  const args = ["-p", "--model", "claude-haiku-4-5", "--output-format", "json"];
+  // Replace the default system prompt so this behaves as a clean, single-shot
+  // JSON completion rather than an agent. Without this, subscription `claude -p`
+  // loads the user's global CLAUDE.md and tools, goes multi-turn, and sometimes
+  // replies in prose ("Nothing to commit here…") — which breaks JSON parsing.
+  // Disabling tools keeps it to one turn.
+  const synthSystem =
+    "You are a non-interactive JSON generator for an automated logging pipeline. " +
+    "Do not use tools. Do not converse, explain, or add any commentary. " +
+    "Output exactly one JSON object matching the schema in the user message — " +
+    "nothing before it, nothing after it, no markdown fences.";
+  const args = [
+    "-p",
+    "--model",
+    "claude-haiku-4-5",
+    "--output-format",
+    "json",
+    "--system-prompt",
+    synthSystem,
+    "--disallowed-tools",
+    "Bash,Read,Edit,Write,Glob,Grep,Task,WebFetch,WebSearch,NotebookEdit,TodoWrite",
+  ];
   if (apiKey) {
     args.push("--bare");
   }
@@ -324,9 +344,11 @@ function runClaudeSynth(digest: string): SynthResult | null {
     .replace(/\s*```\s*$/m, "")
     .trim();
 
-  try {
-    const parsed = JSON.parse(stripped) as any;
-    // Defensive defaults for arrays
+  // The model sometimes wraps the JSON in prose ("Here's the summary JSON: {...}")
+  // or a code fence, so a strict JSON.parse of the whole response fails and the
+  // synthesis is lost. Extract the first balanced {...} object instead.
+  const parsed = extractJsonObject(stripped) ?? extractJsonObject(innerRaw);
+  if (parsed) {
     return {
       progress: parsed.progress ?? "",
       suggested_next: parsed.suggested_next ?? "",
@@ -334,10 +356,42 @@ function runClaudeSynth(digest: string): SynthResult | null {
       blockers: Array.isArray(parsed.blockers) ? parsed.blockers : [],
       bullets: Array.isArray(parsed.bullets) ? parsed.bullets : [],
     } as SynthResult;
-  } catch {
-    log(`Failed to parse inner JSON: ${stripped.slice(0, 300)}`);
-    return null;
   }
+  log(`Failed to parse inner JSON: ${stripped.slice(0, 300)}`);
+  return null;
+}
+
+/** Parse `text` as JSON; if that fails, find and parse the first balanced
+ *  {...} object embedded in it (handles prose preambles / code fences / trailing
+ *  commentary the model may add around the JSON). */
+function extractJsonObject(text: string): any | null {
+  try {
+    return JSON.parse(text);
+  } catch {}
+  const start = text.indexOf("{");
+  if (start === -1) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (esc) { esc = false; continue; }
+    if (ch === "\\") { esc = true; continue; }
+    if (ch === '"') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (depth === 0) {
+        try {
+          return JSON.parse(text.slice(start, i + 1));
+        } catch {
+          return null;
+        }
+      }
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------

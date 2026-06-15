@@ -338,9 +338,14 @@ export async function collectDelta(opts: CollectOptions): Promise<DeltaResult> {
       // Check ignore list against this line's cwd
       if (isIgnored(resolvedLineCwd, ignoreList)) continue;
 
-      // Check if this cwd belongs to a different registered project
+      // Check if this cwd belongs to a MORE SPECIFIC registered project. A line
+      // belongs to the project whose cwd is the longest prefix of the line's cwd.
+      // Only exclude when another project's cwd is a LONGER prefix than ours —
+      // otherwise a project nested under another (e.g. bhm/mikdash3 under bhm)
+      // would have its own lines dropped by the ancestor, and never sync.
       let belongsToOther = false;
       for (const resolvedOther of resolvedOthers) {
+        if (resolvedOther.length <= resolvedProjectPath.length) continue;
         if (
           resolvedLineCwd === resolvedOther ||
           resolvedLineCwd.startsWith(resolvedOther + "/")
