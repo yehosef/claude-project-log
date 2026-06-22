@@ -661,13 +661,16 @@ async function refreshStatusCacheIfStale(
   }
 }
 
+type ProcessResult = "synced" | "debounced" | "deferred" | "failed";
+
 async function processProject(
   slug: string,
   entry: RegistryEntry,
   otherProjectCwds: string[],
   dryRun: boolean,
-  isSweep: boolean = false
-): Promise<void> {
+  isSweep: boolean = false,
+  allowSynth: boolean = true
+): Promise<ProcessResult> {
   const ignoreList = loadIgnore();
   const state = loadProjectState(slug);
 
@@ -712,7 +715,7 @@ async function processProject(
   // Debounce: need at least 3 new lines
   if (delta.count < 3) {
     log(`Debounce: only ${delta.count} lines, skipping`);
-    return;
+    return "debounced";
   }
 
   const digest = delta.digestLines.join("\n");
@@ -720,7 +723,16 @@ async function processProject(
   if (dryRun) {
     console.log(`\n[dry-run] Would synthesize for: ${entry.name}`);
     console.log(`  ${delta.count} new lines, digest ${digest.length} chars`);
-    return;
+    return "debounced";
+  }
+
+  // Per-sweep synthesis budget reached: leave this project's delta for the next
+  // sweep (offsets NOT advanced, so nothing is lost). Combined with stalest-first
+  // ordering, this bounds each sweep's wall-time so it reliably completes, while
+  // still draining a backlog a few projects per sweep.
+  if (!allowSynth) {
+    log(`Deferred ${entry.name} (${delta.count} lines) — sweep synth budget reached`);
+    return "deferred";
   }
 
   // Gather git context only now that we know we'll synthesize. Each call spawns
@@ -739,9 +751,9 @@ async function processProject(
   const synthResult = runClaudeSynth(fullDigest);
 
   if (!synthResult) {
-    log(`Synthesis failed for ${entry.name}`);
+    console.error(`[sweep] synth-FAILED ${entry.name} (parse/model error)`);
     // Still advance offsets? No — per spec, only advance after successful Notion write.
-    return;
+    return "failed";
   }
 
   const isoDatetime = now.toISOString().replace("T", " ").slice(0, 16);
@@ -846,15 +858,18 @@ async function processProject(
     const stateMd = generateStateMd(entry, state, synthResult, gitCtx);
     writeStateMd(slug, stateMd);
     log(`Wrote STATE.md for ${slug}`);
+    console.error(`[sweep] synced ${entry.name} (${delta.count} lines)`);
+    return "synced";
   } catch (e) {
     if (e instanceof NotionError) {
       console.error(
-        `[synth] Notion error for ${entry.name}: ${e.status} ${e.body.slice(0, 200)}`
+        `[sweep] Notion-FAILED ${entry.name}: ${e.status} ${e.body.slice(0, 160)}`
       );
     } else {
-      console.error(`[synth] Error for ${entry.name}:`, e);
+      console.error(`[sweep] error ${entry.name}:`, e);
     }
     // Do NOT advance offsets on failure
+    return "failed";
   }
 }
 
@@ -1066,19 +1081,61 @@ async function runSweep(dryRun: boolean): Promise<void> {
 
   if (!dryRun) {
     savePending(pending);
-    saveGlobalState({ ...gs, lastSweepAt: new Date().toISOString() });
   }
 
-  // Step 3: process all registered projects
+  // Step 3: process registered projects STALEST-FIRST (least-recently-synced),
+  // so an interrupted sweep still drains the most-overdue projects rather than
+  // always neglecting the same late-registered ones. Cap synthesis (claude +
+  // Notion) calls per sweep so each sweep stays bounded and reliably completes;
+  // deferred projects keep their offsets and sync on the next sweep.
   const allCwds = Object.values(registry).map((e) => e.cwd);
+  const ordered = Object.entries(registry)
+    .map(([slug, entry]) => {
+      const st = loadProjectState(slug);
+      const lsa = st.lastSynthAt ? new Date(st.lastSynthAt).getTime() : 0;
+      return { slug, entry, lsa };
+    })
+    .sort((a, b) => a.lsa - b.lsa);
 
-  for (const [slug, entry] of Object.entries(registry)) {
+  const MAX_SYNTH = 8;
+  let synthCount = 0;
+  let synced = 0;
+  let failed = 0;
+  let deferred = 0;
+  const sweepStart = Date.now();
+  console.error(
+    `[sweep] START ${new Date().toISOString()} pid=${process.pid} projects=${ordered.length}`
+  );
+
+  for (const { slug, entry } of ordered) {
     const otherCwds = allCwds.filter((c) => c !== entry.cwd);
     try {
-      await processProject(slug, entry, otherCwds, dryRun, true);
+      const res = await processProject(
+        slug,
+        entry,
+        otherCwds,
+        dryRun,
+        true,
+        synthCount < MAX_SYNTH
+      );
+      if (res === "synced") { synthCount++; synced++; }
+      else if (res === "failed") { synthCount++; failed++; }
+      else if (res === "deferred") { deferred++; }
     } catch (e) {
-      console.error(`[synth] Error processing ${entry.name}:`, e);
+      failed++;
+      console.error(`[sweep] error processing ${entry.name}:`, e);
     }
+  }
+
+  const dur = Math.round((Date.now() - sweepStart) / 1000);
+  console.error(
+    `[sweep] DONE ${dur}s synced=${synced} failed=${failed} deferred=${deferred}`
+  );
+
+  // Advance the discovery watermark ONLY after the loop completes, so an
+  // interrupted/killed sweep does not falsely mark itself done.
+  if (!dryRun) {
+    saveGlobalState({ ...gs, lastSweepAt: new Date().toISOString() });
   }
 }
 
