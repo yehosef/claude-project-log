@@ -430,6 +430,11 @@ if (import.meta.main) {
         await cmdStatus();
         break;
 
+      case "doctor": {
+        const { doctor } = await import("./doctor.ts");
+        process.exit(await doctor());
+      }
+
       case "sweep": {
         const dryRun = rest.includes("--dry-run");
         await cmdSweep(dryRun);

@@ -42,6 +42,30 @@ function cachedRealpath(p: string): string {
   return r;
 }
 
+/**
+ * Decide whether a transcript line (by its cwd) belongs to a given project.
+ * A line belongs to the project whose registered cwd is the LONGEST prefix of
+ * the line's cwd. Pure + exported so it can be unit-tested directly — this is
+ * the routing logic that had the nested-project bug (bhm/mikdash3 under bhm).
+ *
+ * All args must be resolved (realpath'd) absolute paths.
+ */
+export function lineBelongsToProject(
+  lineCwd: string,
+  projectCwd: string,
+  otherCwds: string[]
+): boolean {
+  // Must be within (at or under) this project's cwd.
+  const within = lineCwd === projectCwd || lineCwd.startsWith(projectCwd + "/");
+  if (!within) return false;
+  // ...unless a MORE SPECIFIC (longer) project also contains it — then it's theirs.
+  for (const other of otherCwds) {
+    if (other.length <= projectCwd.length) continue; // not more specific
+    if (lineCwd === other || lineCwd.startsWith(other + "/")) return false;
+  }
+  return true;
+}
+
 /** All transcript .jsonl files, enumerated once per sweep. */
 function getAllJsonl(): string[] {
   if (fileListCache) return fileListCache;
@@ -338,29 +362,9 @@ export async function collectDelta(opts: CollectOptions): Promise<DeltaResult> {
       // Check ignore list against this line's cwd
       if (isIgnored(resolvedLineCwd, ignoreList)) continue;
 
-      // Check if this cwd belongs to a MORE SPECIFIC registered project. A line
-      // belongs to the project whose cwd is the longest prefix of the line's cwd.
-      // Only exclude when another project's cwd is a LONGER prefix than ours —
-      // otherwise a project nested under another (e.g. bhm/mikdash3 under bhm)
-      // would have its own lines dropped by the ancestor, and never sync.
-      let belongsToOther = false;
-      for (const resolvedOther of resolvedOthers) {
-        if (resolvedOther.length <= resolvedProjectPath.length) continue;
-        if (
-          resolvedLineCwd === resolvedOther ||
-          resolvedLineCwd.startsWith(resolvedOther + "/")
-        ) {
-          belongsToOther = true;
-          break;
-        }
-      }
-      if (belongsToOther) continue;
-
-      // Check if this cwd is within the project path
-      const withinProject =
-        resolvedLineCwd === resolvedProjectPath ||
-        resolvedLineCwd.startsWith(resolvedProjectPath + "/");
-      if (!withinProject) continue;
+      // Route this line to the project whose cwd is the longest matching prefix.
+      if (!lineBelongsToProject(resolvedLineCwd, resolvedProjectPath, resolvedOthers))
+        continue;
 
       // Extract content
       const message = obj.message;

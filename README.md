@@ -116,6 +116,7 @@ Defense in depth: even inside a tracked project, individual transcript lines are
 ## Commands
 
 ```bash
+bun ~/.claude/projects-log/cli.ts doctor           # health check: heartbeat, sweep history, sync lag
 bun ~/.claude/projects-log/cli.ts status           # show tracked projects + pending
 bun ~/.claude/projects-log/cli.ts sweep            # run sweep now
 bun ~/.claude/projects-log/cli.ts sweep --dry-run  # see what would happen, no writes
@@ -127,6 +128,33 @@ bun ~/.claude/projects-log/cli.ts unregister .     # remove from registry (stops
 bun ~/.claude/projects-log/cli.ts pending          # dirs seen but below the 3-turn floor
 bun ~/.claude/projects-log/cli.ts pull .           # refresh Next Steps + STATE.md
 ```
+
+## Checking that it works
+
+```bash
+bun ~/.claude/projects-log/cli.ts doctor
+```
+
+`doctor` is the source of truth — no guessing. It reports:
+- whether the `SessionStart` / `Stop` / `PostToolUse` / `SessionEnd` hooks are wired,
+- heartbeat freshness (`.last-sweep`, `global lastSweepAt`, lock),
+- **recent sweep history** parsed from the log — each `[sweep] START … DONE Ns synced/failed/deferred`, and flags any that started but never finished (interrupted),
+- **sync lag** per project: transcript activity vs Notion `Last Worked`, separating *current* / *pending next sweep* (normal ~20-min latency) / **STALE** (work that predates the last completed sweep and still isn't in Notion — a real miss).
+
+Exit code is non-zero if anything is unhealthy, so you can wire it into a check.
+
+Every sweep also appends `[sweep] START/DONE` lines to `~/.claude/logs/projectlog.out.log` — `tail -f` it to watch live.
+
+## Tests
+
+```bash
+cd ~/.claude/projects-log && bun test    # or: bun test in the repo's lib/
+```
+
+Unit tests (`sync.test.ts`) cover the pure logic that caused real sync failures:
+cwd routing (including nested projects like `bhm/mikdash3` under `bhm`), tolerant
+JSON extraction from model output (prose preambles, code fences, pure-prose → null),
+and ignore-list matching.
 
 ## How it works
 

@@ -61,6 +61,7 @@ import {
   NotionError,
 } from "./notion-api.ts";
 import { getAnthropicKey } from "./env.ts";
+import { extractJsonObject } from "./json-extract.ts";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -361,38 +362,7 @@ function runClaudeSynth(digest: string): SynthResult | null {
   return null;
 }
 
-/** Parse `text` as JSON; if that fails, find and parse the first balanced
- *  {...} object embedded in it (handles prose preambles / code fences / trailing
- *  commentary the model may add around the JSON). */
-function extractJsonObject(text: string): any | null {
-  try {
-    return JSON.parse(text);
-  } catch {}
-  const start = text.indexOf("{");
-  if (start === -1) return null;
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  for (let i = start; i < text.length; i++) {
-    const ch = text[i];
-    if (esc) { esc = false; continue; }
-    if (ch === "\\") { esc = true; continue; }
-    if (ch === '"') { inStr = !inStr; continue; }
-    if (inStr) continue;
-    if (ch === "{") depth++;
-    else if (ch === "}") {
-      depth--;
-      if (depth === 0) {
-        try {
-          return JSON.parse(text.slice(start, i + 1));
-        } catch {
-          return null;
-        }
-      }
-    }
-  }
-  return null;
-}
+// extractJsonObject moved to ./json-extract.ts (pure + unit-tested).
 
 // ---------------------------------------------------------------------------
 // Git context gathering
